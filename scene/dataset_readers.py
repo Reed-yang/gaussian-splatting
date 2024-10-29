@@ -105,8 +105,9 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             except:
                 print("\n", key, "not found in depths_params")
 
-        image_path = os.path.join(images_folder, extr.name)
-        image_name = extr.name
+        # TODO: store image_name store image filename or relative path
+        image_name = os.path.basename(extr.name)
+        image_path = os.path.join(images_folder, image_name)
         depth_path = os.path.join(depths_folder, f"{extr.name[:-n_remove]}.png") if depths_folder != "" else ""
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, depth_params=depth_params,
@@ -122,7 +123,8 @@ def fetchPly(path):
     vertices = plydata['vertex']
     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
     colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    # normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    normals = np.zeros_like(positions)
     return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
 def storePly(path, xyz, rgb):
