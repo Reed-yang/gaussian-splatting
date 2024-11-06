@@ -17,7 +17,7 @@ import cv2
 
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset):
+def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset, size=None):
     image = Image.open(cam_info.image_path)
 
     if cam_info.depth_path != "":
@@ -60,17 +60,20 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
+    if size is not None:
+        resolution = size
+        
     return Camera(resolution, colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
                   image=image, invdepthmap=invdepthmap,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
                   train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
 
-def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
+def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset, size=None):
     camera_list = []
 
     for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale, is_nerf_synthetic, is_test_dataset))
+        camera_list.append(loadCam(args, id, c, resolution_scale, is_nerf_synthetic, is_test_dataset, size=size))
 
     return camera_list
 

@@ -22,6 +22,7 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+from scene.read_cityfusion_data import readCityFusionSceneInfo
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -313,5 +314,6 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "CityFusion" : readCityFusionSceneInfo,
 }

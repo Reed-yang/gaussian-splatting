@@ -63,6 +63,7 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self.sky_distance = None
         self.setup_functions()
 
     def capture(self):
@@ -146,7 +147,7 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
+    def create_from_pcd(self, all_args, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
@@ -174,6 +175,20 @@ class GaussianModel:
         self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
+
+        # get sky box mask
+        # TODO use args to control here
+        if all_args.use_skybox:
+            print("Freezing skybox parameters")
+            num_sky_points = all_args.skybox_points_num
+            sky_mask = torch.zeros((fused_point_cloud.shape[0]), dtype=torch.bool, device="cuda")
+            sky_mask[-num_sky_points:] = True
+
+            # self._xyz[sky_mask] = self._xyz[sky_mask].detach()
+            # self._scaling.data[sky_mask] = self._scaling.data[sky_mask].detach()
+            sky_opacities = self.inverse_opacity_activation(1.0 * torch.ones((num_sky_points, 1), dtype=torch.float, device="cuda"))
+            self._opacity.data[sky_mask] = sky_opacities
+            # self._opacity.data[sky_mask] = self._opacity.data[sky_mask].detach()
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -255,10 +270,32 @@ class GaussianModel:
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 
+    def get_skybox_mask(self):
+        center = torch.mean(self.get_xyz, dim=0)
+        dist = torch.norm(self.get_xyz - center, dim=1)
+        sky_mask = dist > 0.8 * self.sky_distance
+        return sky_mask
+
     def reset_opacity(self):
+        # TODO dont reset bg points
+        sky_mask = self.get_skybox_mask()
+        print(f"There are {sky_mask.sum()} sky points")
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        opacities_new[sky_mask] = self.inverse_opacity_activation(1.0 * torch.ones((sky_mask.sum(), 1), dtype=torch.float, device="cuda"))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        # self._opacity[~sky_mask] = optimizable_tensors["opacity"]
         self._opacity = optimizable_tensors["opacity"]
+
+    def reset_skybox_grad(self):
+        sky_mask = self.get_skybox_mask()
+        # print(f"There are {sky_mask.sum()} sky points")
+        # print(f"Skybox mean xyz {torch.mean(self.get_xyz[sky_mask], dim=0)}")
+        self._xyz.grad[sky_mask] = 0.0
+        self._opacity.grad[sky_mask] = 0.0
+        self._scaling.grad[sky_mask] = 0.0
+        self._rotation.grad[sky_mask] = 0.0
+        # self._opacity[sky_mask] = self.inverse_opacity_activation(1.0 * torch.ones((sky_mask.sum(), 1), dtype=torch.float, device="cuda"))
+
 
     def load_ply(self, path, use_train_test_exp = False):
         plydata = PlyData.read(path)
@@ -414,7 +451,7 @@ class GaussianModel:
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-
+        print(f"Split {selected_pts_mask.sum()} points")
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
@@ -437,7 +474,7 @@ class GaussianModel:
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        
+        print(f"Cloned {selected_pts_mask.sum()} points")
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -457,16 +494,23 @@ class GaussianModel:
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
+        # TODO 不确定 sky box 此处如何避免prune
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        
+        # exclude skybox points
+        sky_mask = self.get_skybox_mask()
+        prune_mask = torch.logical_and(prune_mask, torch.logical_not(sky_mask))
+        
         self.prune_points(prune_mask)
         tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
         torch.cuda.empty_cache()
+        print(f"Pruned {prune_mask.sum()} points")
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)

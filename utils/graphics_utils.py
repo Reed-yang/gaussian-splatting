@@ -14,10 +14,40 @@ import math
 import numpy as np
 from typing import NamedTuple
 
-class BasicPointCloud(NamedTuple):
-    points : np.array
-    colors : np.array
-    normals : np.array
+# class BasicPointCloud(NamedTuple):
+#     points : np.array
+#     colors : np.array
+#     normals : np.array
+
+class BasicPointCloud:
+    def __init__(self, points: np.array, colors: np.array, normals: np.array):
+        self._points = points
+        self._colors = colors
+        self._normals = normals
+
+    @property
+    def points(self):
+        return self._points
+
+    @points.setter
+    def points(self, value):
+        self._points = value
+
+    @property
+    def colors(self):
+        return self._colors
+
+    @colors.setter
+    def colors(self, value):
+        self._colors = value
+
+    @property
+    def normals(self):
+        return self._normals
+
+    @normals.setter
+    def normals(self, value):
+        self._normals = value
 
 def geom_transform_points(points, transf_matrix):
     P, _ = points.shape

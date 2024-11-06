@@ -40,7 +40,7 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, all_args):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -48,7 +48,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, gaussians)
+    scene = Scene(dataset, gaussians, all_args=all_args)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -64,6 +64,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
 
     viewpoint_stack = scene.getTrainCameras().copy()
+    if all_args.train_ground_extra:
+        ground_viewpoint_stack = scene.getGroundCameras().copy()
+    # if all_args.use_diffusion_prior:
+    #     diffusion_viewpoint_stack = scene.getDiffusionCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
@@ -94,13 +98,37 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
+        # use rand to determine ground or not
+        ground_prob = all_args.ground_prob
+        use_ground = all_args.train_ground_extra and (randint(0, 100) < ground_prob * 100)
+        if use_ground:
+            if not ground_viewpoint_stack:
+                ground_viewpoint_stack = scene.getGroundCameras().copy()
+            rand_idx = randint(0, len(ground_viewpoint_stack) - 1)
+            viewpoint_cam = ground_viewpoint_stack.pop(rand_idx)
+        # ground_extra_start = all_args.ground_extra_start
+        # ground_extra_end = all_args.ground_extra_end
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
-        viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
+        else:
+
+        # if all_args.train_ground_extra:
+        #     if not ground_viewpoint_stack:
+        #         ground_viewpoint_stack = scene.getGroundCameras().copy()
+        #     if ground_extra_start is not None:
+        #         if iteration < ground_extra_start:
+        #             rand_idx = randint(0, len(ground_viewpoint_stack) - 1)
+        #             viewpoint_cam = ground_viewpoint_stack.pop(rand_idx)
+        #     if ground_extra_end is not None:
+        #         if iteration > ground_extra_end:
+        #             rand_idx = randint(0, len(ground_viewpoint_stack) - 1)
+        #             viewpoint_cam = ground_viewpoint_stack.pop(rand_idx)
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+                viewpoint_indices = list(range(len(viewpoint_stack)))
+            else:
+                rand_idx = randint(0, len(viewpoint_indices) - 1)
+                viewpoint_cam = viewpoint_stack.pop(rand_idx)
+                vind = viewpoint_indices.pop(rand_idx)
 
         # Render
         if (iteration - 1) == debug_from:
@@ -141,6 +169,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss.backward()
 
+        gaussians.reset_skybox_grad()
         iter_end.record()
 
         with torch.no_grad():
@@ -155,13 +184,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, dataset.train_test_exp, SPARSE_ADAM_AVAILABLE), dataset.train_test_exp)
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
             # Densification
-            if iteration < opt.densify_until_iter:
+            if iteration < opt.densify_until_iter and not all_args.disable_adc:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -261,14 +290,35 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[2, 10, 50, 100, 500, 1000, 3000, 4000, 7_000, 10000, 20000, 30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--use_diffusion_prior", action='store_true', default=False)
+    parser.add_argument("--diffusion_path", type=str, default = None)
+    parser.add_argument("--use_skybox", action='store_true', default=False)
+    parser.add_argument("--skybox_points_num", type=int, default=100_000)
+    parser.add_argument("--disable_adc", action='store_true', default=False)
+    parser.add_argument("--ground_extra_start", type=int, default=None)
+    parser.add_argument("--ground_extra_end", type=int, default=None)
+    parser.add_argument("--train_ground_extra", action='store_true', default=False)
+    parser.add_argument("--ground_prob", type=float, default=0.5)
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
+    test_step = args.iterations // 20
+    save_step = args.iterations // 10
+    args.test_iterations.extend([i for i in range(10000, args.iterations + 1, test_step)])
+    args.save_iterations.extend([i for i in range(30000, args.iterations + 1, save_step)])
+    args.test_iterations = sorted(set(args.test_iterations))
+    args.save_iterations = sorted(set(args.save_iterations))
+    # args.iterations = sorted(set(args.iterations))
+    print(f"Test iterations: {args.test_iterations}")
+    print(f"Save iterations: {args.save_iterations}")
+    print(f"Iterations: {args.iterations}")
+
     
     print("Optimizing " + args.model_path)
 
@@ -279,7 +329,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args)
 
     # All done
     print("\nTraining complete.")

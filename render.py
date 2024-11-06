@@ -68,6 +68,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    # parser.add_argument("--use_diffusion_prior", action='store_true', default=False)
+    # parser.add_argument("--diffusion_path", type=str, default = None)
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
