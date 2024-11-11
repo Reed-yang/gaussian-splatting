@@ -45,10 +45,10 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
+def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool, all_args=None):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, all_args=all_args)
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -68,6 +68,18 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--real_data", action="store_true")
+    parser.add_argument("--use_diffusion_prior", action='store_true', default=False)
+    parser.add_argument("--diffusion_path", type=str, default = None)
+    parser.add_argument("--use_skybox", action='store_true', default=False)
+    parser.add_argument("--skybox_points_num", type=int, default=100_000)
+    parser.add_argument("--disable_adc", action='store_true', default=False)
+    parser.add_argument("--ground_extra_start", type=int, default=None)
+    parser.add_argument("--ground_extra_end", type=int, default=None)
+    parser.add_argument("--train_ground_extra", action='store_true', default=False)
+    parser.add_argument("--ground_prob", type=float, default=0.5)
+    parser.add_argument("--conf_path", type=str, default=None)
+
     # parser.add_argument("--use_diffusion_prior", action='store_true', default=False)
     # parser.add_argument("--diffusion_path", type=str, default = None)
     args = get_combined_args(parser)
@@ -76,4 +88,4 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, SPARSE_ADAM_AVAILABLE)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, SPARSE_ADAM_AVAILABLE, all_args=args)

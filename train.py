@@ -22,6 +22,37 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import numpy as np
+import torch.nn.functional as F
+from PIL import Image
+import torchvision.transforms as transforms
+transform = transforms.ToTensor()
+import cv2
+from lpips import LPIPS
+from torchvision.utils import save_image
+
+def lpips_loss(loss_fn, pred, gt):
+    loss = loss_fn.forward(pred, gt)
+    return loss
+
+from torch import nn
+
+def convert_to_buffer(module: nn.Module, persistent: bool = True):
+    # Recurse over child modules.
+    for name, child in list(module.named_children()):
+        convert_to_buffer(child, persistent)
+
+    # Also re-save buffers to change persistence.
+    for name, parameter_or_buffer in (
+        *module.named_parameters(recurse=False),
+        *module.named_buffers(recurse=False),
+    ):
+        value = parameter_or_buffer.detach().clone()
+        delattr(module, name)
+        module.register_buffer(name, value, persistent=persistent)
+
+
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -71,6 +102,37 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+
+    loss_lpips = LPIPS(net="vgg").to("cuda")
+    convert_to_buffer(loss_lpips, persistent=False)
+    lpips_weight = 1.0
+    lpips_start = 5000
+
+    if all_args.conf_path is not None:
+        conf_paths = sorted([os.path.join(all_args.conf_path, f) for f in os.listdir(all_args.conf_path) if f.endswith(('.npy'))])
+        confs = [torch.tensor(np.load(f), device="cuda") for f in conf_paths]
+        # Assuming conf_map is one of the loaded confs with shape (336, 512)
+        for i in range(len(confs)):
+            conf_map = confs[i]
+
+            # Calculate max and mean values
+            max_value = torch.max(conf_map)
+            mean_value = torch.mean(conf_map)
+
+            # Calculate padding sizes
+            padding_bottom = 512 - conf_map.shape[0]  # Total rows to add
+            padding_top = padding_bottom // 2  # Half for the top
+            padding_bottom = padding_bottom - padding_top  # Remaining for the bottom
+
+            # Create padding tensors
+            top_padding = torch.full((padding_top, conf_map.shape[1]), mean_value, device="cuda")
+            bottom_padding = torch.full((padding_bottom, conf_map.shape[1]), max_value, device="cuda")
+
+            # Concatenate to form the final map
+            conf_map = torch.cat([top_padding, conf_map, bottom_padding], dim=0)
+
+            # Replace the modified map back in the list
+            confs[i] = conf_map
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -144,14 +206,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image *= alpha_mask
 
         # Loss
+        lo_lp = 0.0
         gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
+        if 'diffusion' in viewpoint_cam.image_name and all_args.conf_path is not None:
+            diff_idx = int(viewpoint_cam.image_name.split('_')[-1].split('.')[0])
+            conf_map = confs[diff_idx]
+            point_render = f"CityFusionData/ningbo/ningbo_block15/ground/Render/Render_{diff_idx}.png"
+            point_render = Image.open(point_render).convert('RGB')
+            point_render = transform(point_render).cuda()
+            point_render_mask = (point_render.sum(dim=0) > 0).bool()
+            # conf_map = F.interpolate(conf_map, size=(image.shape[-2], image.shape[-1]), mode='bilinear')
+            conf = (conf_map / torch.max(conf_map)).unsqueeze(0)
+            uncertainty = 1 - conf
+            # Ll1 = (torch.abs((image - gt_image)) * uncertainty).mean()
+            # Ll1 = l1_loss(image * conf, gt_image * conf)
+            # rand mask the top area, p = 0.5
+            # rand_int = randint(0, 1)
+            # top_area_mask = torch.ones_like(gt_image)
+            # top_area_mask[:, :gt_image.shape[-1] // 2] = 0.0
+            # if rand_int > 0.1:
+            top_area_mask = torch.ones((gt_image.shape[-2], gt_image.shape[-1]), device="cuda")
+            if viewpoint_cam.use_mask:
+                top_area_mask[:gt_image.shape[-1] // 2, :] = 0.0
+                gt_image[:,~top_area_mask.bool()] = 0.0
+                image[:,~top_area_mask.bool()] = 0.0
+            
+            Ll1 = l1_loss(image, gt_image)
+            # if iteration > lpips_start:
+            #     image_for_lp = image
+            #     image_for_lp[:,~point_render_mask] = 0.0
+            #     # lo_lp = loss_lpips.forward(image_for_lp, point_render).mean()
+            #     lo_lp = l1_loss(image_for_lp, point_render) # TODO another l1 loss
+                
+            
+
+        else:
+            Ll1 = l1_loss(image, gt_image)
         if FUSED_SSIM_AVAILABLE:
             ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
         else:
             ssim_value = ssim(image, gt_image)
+        
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value) + lpips_weight * lo_lp
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -169,7 +266,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss.backward()
 
-        gaussians.reset_skybox_grad()
+        if gaussians.sky_distance is not None:
+            gaussians.reset_skybox_grad()
         iter_end.record()
 
         with torch.no_grad():
@@ -305,6 +403,8 @@ if __name__ == "__main__":
     parser.add_argument("--ground_extra_end", type=int, default=None)
     parser.add_argument("--train_ground_extra", action='store_true', default=False)
     parser.add_argument("--ground_prob", type=float, default=0.5)
+    parser.add_argument("--conf_path", type=str, default=None)
+    parser.add_argument("--real_data", action='store_true', default=False)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

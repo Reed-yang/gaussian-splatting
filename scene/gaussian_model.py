@@ -278,10 +278,12 @@ class GaussianModel:
 
     def reset_opacity(self):
         # TODO dont reset bg points
-        sky_mask = self.get_skybox_mask()
-        print(f"There are {sky_mask.sum()} sky points")
+        if self.sky_distance is not None:
+            sky_mask = self.get_skybox_mask()
+            print(f"There are {sky_mask.sum()} sky points")
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
-        opacities_new[sky_mask] = self.inverse_opacity_activation(1.0 * torch.ones((sky_mask.sum(), 1), dtype=torch.float, device="cuda"))
+        if self.sky_distance is not None:
+            opacities_new[sky_mask] = self.inverse_opacity_activation(1.0 * torch.ones((sky_mask.sum(), 1), dtype=torch.float, device="cuda"))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         # self._opacity[~sky_mask] = optimizable_tensors["opacity"]
         self._opacity = optimizable_tensors["opacity"]

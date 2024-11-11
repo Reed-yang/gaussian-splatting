@@ -12,21 +12,40 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 import re
+from random import randint
 
-class CameraInfo(NamedTuple):
-    uid: int
-    R: np.array
-    T: np.array
-    FovY: np.array
-    FovX: np.array
-    image: np.array
-    depth_params: dict
-    image_path: str
-    image_name: str
-    depth_path: str
-    width: int
-    height: int
-    is_test: bool
+# class CameraInfo(NamedTuple):
+#     uid: int
+#     R: np.array
+#     T: np.array
+#     FovY: np.array
+#     FovX: np.array
+#     image: np.array
+#     depth_params: dict
+#     image_path: str
+#     image_name: str
+#     depth_path: str
+#     width: int
+#     height: int
+#     is_test: bool
+#     use_mask: bool = False
+
+class CameraInfo:
+    def __init__(self, uid, R, T, FovY, FovX, image, depth_params, image_path, image_name, depth_path, width, height, is_test, use_mask=False):
+        self.uid = uid
+        self.R = R
+        self.T = T
+        self.FovY = FovY
+        self.FovX = FovX
+        self.image = image
+        self.depth_params = depth_params
+        self.image_path = image_path
+        self.image_name = image_name
+        self.depth_path = depth_path
+        self.width = width
+        self.height = height
+        self.is_test = is_test
+        self.use_mask = use_mask
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -104,25 +123,58 @@ def airsim2opencv(qevc, tevc):
     c2w = np.linalg.inv(F)
     return c2w
 
-def readCityFusionCameras(aerial_views, ground_views, eval=False):
+def read_file_to_list(file_path):
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+    return lines
+
+def parse_line_to_dict(line):
+    parts = line.strip().split(', ')
+    return {
+        'width': int(parts[0]),
+        'height': int(parts[1]),
+        'FovX': float(parts[2]),
+        'FovY': float(parts[3]),
+        'image_name': parts[4]
+    }
+
+def load_intrinsics_to_dict_list(file_path):
+    lines = read_file_to_list(file_path)
+    dict_list = [parse_line_to_dict(line) for line in lines]
+    return dict_list
+
+def readCityFusionCameras(aerial_views, ground_views, eval=False, real_data=False):
     aerial_cam_infos = []
+    loaded_intr = None
+    matric_city = True
+    if real_data and not matric_city:
+        loaded_intr = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(aerial_views[0].image_path))), "intr.txt")
+        loaded_intr = load_intrinsics_to_dict_list(loaded_intr)
     print(f"Reading {len(aerial_views)} aerial views")
     for i, view in enumerate(aerial_views):
         image = Image.open(view.image_path)
         width, height, fov = view.width, view.height, view.fov
         # FovY = FovX = fov
         fx = fy = width / (2 * np.tan(np.radians(fov) / 2))
-        # cx = width / 2
-        # cy = height / 2
-        # K = np.array([
-        #     [fx, 0, cx],
-        #     [0, fy, cy],
-        #     [0, 0, 1]
-        # ])
         FovX = FovY = focal2fov(fx, width)
 
         # extract pose in airsim coor.
-        c2w = airsim2opencv(view.orientation, view.position)
+        if real_data:
+            c2w = np.eye(4)
+            c2w[:3, :3] = quaternion_to_rotation_matrix(view.orientation)
+            c2w[:3, 3] = view.position
+            name = os.path.basename(view.image_path)
+            if loaded_intr is not None:
+                for intr in loaded_intr:
+                    if intr['image_name'] == name:
+                        FovX = intr['FovX']
+                        FovY = intr['FovY']
+                        width = intr['width']
+                        height = intr['height']
+                        break
+        else:
+            c2w = airsim2opencv(view.orientation, view.position)
+        
         w2c = np.linalg.inv(c2w)
         R = np.transpose(w2c[:3, :3])
         T = w2c[:3, 3]
@@ -136,15 +188,26 @@ def readCityFusionCameras(aerial_views, ground_views, eval=False):
     ground_cam_infos = []
     print(f"Reading {len(ground_views)} ground views")
     for view in ground_views:
-        image = Image.open(view.image_path)
+        if view.image_path is not None:
+            
+            image = Image.open(view.image_path)
+        else:
+            # print("Real data no ground view captured, make it test")
+            image = None
         width, height, fov = view.width, view.height, view.fov
         # FovY = FovX = fov
         # extract pose in airsim coor.
-        c2w = airsim2opencv(view.orientation, view.position)
+        if real_data:
+            c2w = np.eye(4)
+            c2w[:3, :3] = quaternion_to_rotation_matrix(view.orientation)
+            c2w[:3, 3] = view.position
+        else:
+            c2w = airsim2opencv(view.orientation, view.position)
+
         w2c = np.linalg.inv(c2w)
         R = np.transpose(w2c[:3, :3])
         T = w2c[:3, 3]
-        
+
         fx = fy = width / (2 * np.tan(np.radians(fov) / 2))
         FovX = FovY = focal2fov(fx, width)
 
@@ -244,8 +307,10 @@ def load_aerial_views(path, json_data):
         for view in shot_data['exposure']:
             image_path = os.path.join(data_root, view['image'])
             depth_path = os.path.join(data_root, view['depth'])
-            if not (os.path.exists(depth_path) and os.path.exists(image_path)):
-                assert False, f"Image or depth file not found: {image_path} or {depth_path}"
+            if not os.path.exists(image_path):
+                assert False, f"Image or depth file not found: {image_path}"
+            if not os.path.exists(depth_path):
+                depth_path = None
             position = view['position']
             orientation = view['orientation']
             hwf = view['hwf']
@@ -261,7 +326,7 @@ def load_aerial_views(path, json_data):
     camera_views = [view for shot in camera_shots for view in shot.views]
     return camera_views
 
-def load_ground_views(path, json_data): 
+def load_ground_views(path, json_data, real_data=False): 
     # ground has no shots, all views
     camera_views = []
     view_id = 0
@@ -270,8 +335,11 @@ def load_ground_views(path, json_data):
     for view in json_data['data']:
         image_path = os.path.join(data_root, view['image'])
         depth_path = os.path.join(data_root, data_split_name, view['image'])
-        if not os.path.exists(image_path): # TODO now, dont check depth file, depth path can be None also
-            assert False, f"Image file not found: {image_path}"
+        if not os.path.exists(image_path):
+            # assert False, f"Image file not found: {image_path}"
+            if not real_data:
+                assert False, f"Image file not found: {image_path}"
+            image_path = None # might be real world data, no ground view captured
         if not os.path.exists(depth_path):
             depth_path = None
         position = view['position']
@@ -280,7 +348,7 @@ def load_ground_views(path, json_data):
         width, height, fov = hwf[0], hwf[1], hwf[2]
         aerial_index = view['aerial_index']
         view_index = view['view_index']
-        pointrender_path = os.path.join(data_root, view['render'])
+        # pointrender_path = os.path.join(data_root, view['render'])
         camera_view = CameraView(view_id, image_path, depth_path, position, orientation, width, height, fov)
         camera_views.append(camera_view)
         view_id = view_id + 1
@@ -289,18 +357,23 @@ def load_ground_views(path, json_data):
 def readCityFusionSceneInfo(path, images, eval, all_args, llffhold=8):
     # read and compute cameras from json
     aerial_json = read_json_file(os.path.join(path, "aerial.json"))
-    if os.path.exists(os.path.join(path, "ground_new.json")):
-        ground_json = read_json_file(os.path.join(path, "ground_new.json"))
+    ground_json_path = os.path.join(path, "ground_new.json")
+    if os.path.exists(ground_json_path):
+        ground_json = read_json_file(ground_json_path)
     else:
         ground_json = None
 
     aerial_views = load_aerial_views(path, aerial_json)
     if ground_json:
-        ground_views = load_ground_views(path, ground_json)
+        ground_views = load_ground_views(path, ground_json, real_data=all_args.real_data)
     else:
         ground_views = []
 
-    aerial_cam_infos, ground_cam_infos = readCityFusionCameras(aerial_views, ground_views, eval=eval)
+    aerial_cam_infos, ground_cam_infos = readCityFusionCameras(aerial_views, ground_views, eval=eval, real_data=all_args.real_data)
+    if ground_cam_infos[0].image_path is None:
+        print("Real data no ground view captured, make it test")
+        for cam in ground_cam_infos:
+            cam.is_test = True
     all_cam_infos = aerial_cam_infos + ground_cam_infos
     # TODO new style to determine train/test
     # cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
@@ -324,9 +397,13 @@ def readCityFusionSceneInfo(path, images, eval, all_args, llffhold=8):
             image = Image.open(os.path.join(diffusion_img_path, diffusion_paths[cam.uid]))
             image_path = os.path.join(diffusion_img_path, diffusion_paths[cam.uid])
             image_name = diffusion_paths[cam.uid]
+            rand_int = randint(0, 1)
+            use_mask = False
+            if rand_int > 0.1:
+                use_mask = True
             cam_info = CameraInfo(uid=cam.uid, R=cam.R, T=cam.T, FovY=cam.FovY, FovX=cam.FovX, image=image,
                                 image_path=image_path, image_name=image_name, width=cam.width, height=cam.height,
-                                depth_params=None, depth_path="", is_test=False)
+                                depth_params=None, depth_path="", is_test=False, use_mask=use_mask)
             diffusion_cam_infos.append(cam_info)
         train_cam_infos += diffusion_cam_infos
         ground_cam_infos = diffusion_cam_infos
@@ -334,7 +411,11 @@ def readCityFusionSceneInfo(path, images, eval, all_args, llffhold=8):
     nerf_normalization = getNerfppNorm(train_cam_infos)
     # TODO check pcd name here, fuqiang name it `point3D`
     # instead of normally `points3D`
-    ply_path = os.path.join(path, "pointclouds/point3D.ply") 
+    # TODO NOTICE if use matrixcity, use `point3D-Crop.ply` here
+    if 'matrixcity' in path:
+        ply_path = os.path.join(path, "pointclouds/point3D-Crop2.ply")
+    else:
+        ply_path = os.path.join(path, "pointclouds/point3D.ply") 
 
     if not os.path.exists(ply_path):
         raise FileNotFoundError(f"Point cloud file not found: {ply_path}")

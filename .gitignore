@@ -11,3 +11,9 @@ outputs
 data
 CityFusionData
 submodules/*
+
+*.png
+*.ply
+*.txt
+conf-map
+diffusion_priors

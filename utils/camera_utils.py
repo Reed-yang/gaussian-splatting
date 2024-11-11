@@ -18,7 +18,10 @@ import cv2
 WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset, size=None):
-    image = Image.open(cam_info.image_path)
+    if cam_info.image_path is None:
+        image = Image.new('RGB', (512, 512), (0, 0, 0)) # assume gound view if no image is provided
+    else:
+        image = Image.open(cam_info.image_path)
 
     if cam_info.depth_path != "":
         try:
@@ -62,7 +65,10 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
 
     if size is not None:
         resolution = size
-        
+
+    use_mask = False
+    if hasattr(cam_info, 'use_mask') and cam_info.use_mask:
+        use_mask = True
     return Camera(resolution, colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
                   image=image, invdepthmap=invdepthmap,

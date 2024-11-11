@@ -156,11 +156,11 @@ class Scene:
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, True)
             print(f"Lenght of test_cameras: {len(self.test_cameras[resolution_scale])}")
-            if all_args.train_ground_extra:
+            if all_args is not None and all_args.train_ground_extra:
                 print("Loading Ground Cameras")
                 self.ground_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.ground_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, True)
                 print(f"Lenght of ground_cameras: {len(self.ground_cameras[resolution_scale])}")
-            if all_args.use_diffusion_prior:
+            if all_args is not None and all_args.use_diffusion_prior:
                 print("Loading Diffusion Cameras")
                 image_size = (self.train_cameras[1][0].image_width, self.train_cameras[1][0].image_height)
                 self.diffusion_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.diffusion_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, True, size=image_size)
